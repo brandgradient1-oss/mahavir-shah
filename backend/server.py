@@ -210,13 +210,15 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
             model="gemini-2.5-flash",
             contents=[
                 {"role": "user", "parts": [{"text": user_text}]}
-            ],
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": schema
-            }
+            ]
         )
-        data = resp.parsed if hasattr(resp, 'parsed') and resp.parsed else json.loads(resp.text)
+        raw = getattr(resp, 'text', '') or ''
+        # try to extract JSON block
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            data = json.loads(m.group(0))
+        else:
+            raise ValueError(f"Model did not return JSON. Raw: {raw[:200]}")
     except Exception as e:
         logger.error(f"Gemini extraction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Gemini extraction failed: {e}")
