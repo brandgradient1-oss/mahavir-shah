@@ -23,21 +23,54 @@ function Pair({k,v}){
   );
 }
 
+const steps = [
+  {k:"discover", t:"Finding website"},
+  {k:"crawl", t:"Crawling pages"},
+  {k:"ai", t:"Extracting with AI"},
+  {k:"export", t:"Exporting Excel"},
+];
+
+function ProgressInline({running}){
+  const [p, setP] = useState(0);
+  const [idx, setIdx] = useState(0);
+  useEffect(()=>{
+    if(!running){ setP(0); setIdx(0); return; }
+    let sec = 0; const tm = setInterval(()=>{
+      sec += 0.25; // 250ms
+      const ratio = Math.min(1, sec/15);
+      setP(Math.floor(ratio*100));
+      setIdx(Math.min(steps.length-1, Math.floor(ratio*steps.length)));
+    }, 250);
+    return ()=> clearInterval(tm);
+  },[running]);
+  return (
+    <div className="card" style={{padding:16}}>
+      <div className="small" style={{marginBottom:8,color:"#b8c2cc"}}>{steps[idx].t}</div>
+      <div style={{height:10, background:"rgba(255,255,255,0.08)", borderRadius:999, overflow:'hidden'}}>
+        <div style={{width:`${p}%`, height:'100%', background:"linear-gradient(90deg,#d4fbf1,#aee9ff)", transition:"width .2s ease"}}/>
+      </div>
+      <div className="small" style={{marginTop:8}}>{p}%</div>
+    </div>
+  );
+}
+
 function App() {
+  const [method, setMethod] = useState("url"); // url | name | bulk
   const [url, setUrl] = useState("");
+  const [company, setCompany] = useState("");
+  const [geo, setGeo] = useState("");
   const [mode, setMode] = useState("realtime");
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState(null);
   const [job, setJob] = useState(null);
+  const [bulkInfo, setBulkInfo] = useState(null);
   const [error, setError] = useState("");
+  const [file, setFile] = useState(null);
 
-  useEffect(() => {
-    // smoke test call
-    axios.get(`${API}/`).catch(()=>{});
-  }, []);
+  useEffect(() => { axios.get(`${API}/`).catch(()=>{}); }, []);
 
-  const onScrape = async () => {
-    setLoading(true); setError(""); setData(null); setJob(null);
+  const runUrl = async () => {
+    setLoading(true); setError(""); setData(null); setJob(null); setBulkInfo(null);
     try {
       const res = await axios.post(`${API}/scrape/url`, { url, mode });
       setData(res.data.data);
@@ -46,6 +79,40 @@ function App() {
       const msg = e?.response?.data?.detail || e.message;
       setError(msg);
     } finally { setLoading(false); }
+  };
+
+  const runName = async () => {
+    setLoading(true); setError(""); setData(null); setJob(null); setBulkInfo(null);
+    try {
+      const res = await axios.post(`${API}/scrape/name`, { company_name: company, geography: geo, mode });
+      setData(res.data.data);
+      setJob(res.data);
+    } catch (e) {
+      const msg = e?.response?.data?.detail || e.message;
+      setError(msg);
+    } finally { setLoading(false); }
+  };
+
+  const runBulk = async () => {
+    if(!file) return;
+    setLoading(true); setError(""); setData(null); setJob(null); setBulkInfo(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("mode", mode);
+      const res = await axios.post(`${API}/bulk/upload`, form, { headers: { 'Content-Type': 'multipart/form-data' }});
+      setBulkInfo(res.data);
+      setJob({ job_id: res.data.job_id });
+    } catch (e) {
+      const msg = e?.response?.data?.detail || e.message;
+      setError(msg);
+    } finally { setLoading(false); }
+  };
+
+  const onRun = () => {
+    if(method === 'url') return runUrl();
+    if(method === 'name') return runName();
+    return runBulk();
   };
 
   const downloadHref = useMemo(() => job ? `${API}/download/${job.job_id}` : "#", [job]);
@@ -64,7 +131,7 @@ function App() {
         <div className="header">
           <div className="brand">
             <span className="dot"/>
-            <h1>DataHarvester</h1>
+            <h1>SHOREWAY EXIM SCRAPPER</h1>
           </div>
           <div className="nav">
             <a href="#features">Features</a>
@@ -75,43 +142,85 @@ function App() {
 
         <div className="hero">
           <div className="card">
-            <h2 className="title">AI-powered company data scraper</h2>
-            <p className="subtitle">Paste a company website URL. Choose Real-time (quick) or Deep (multi-page) mode. We extract, normalize, and export to Excel matching Moth.xlsx structure.</p>
-            <div className="form">
-              <Field label="Company Website URL">
-                <input className="input" placeholder="https://example.com" value={url} onChange={e=>setUrl(e.target.value)} />
-              </Field>
-              <Field label="Mode">
-                <select className="select" value={mode} onChange={e=>setMode(e.target.value)}>
-                  <option value="realtime">Real-Time</option>
-                  <option value="deep">Deep</option>
-                </select>
-              </Field>
-              <div style={{display:'flex',gap:12,alignItems:'center'}}>
-                <button className="btn" onClick={onScrape} disabled={loading || !url}>{loading? 'Scraping…':'Run Scrape'}</button>
-                {job && (
-                  <a className="badge" href={downloadHref} target="_blank" rel="noreferrer">
-                    <span className="dot"/> Download Excel
-                  </a>
-                )}
-              </div>
-              {error && <div className="card" style={{borderColor:'#5b0f12', background:'rgba(255,100,100,0.06)'}}>{error}</div>}
+            <h2 className="title">Global company data, in one click</h2>
+            <p className="subtitle">Crawl websites, extract structured profiles with AI, and export clean Excel files. Works for single URLs, company + geography lookup, and bulk lists. Designed for sourcing, compliance, and go‑to‑market teams.</p>
+
+            <div className="badge" style={{marginBottom:12}}>
+              <span className="dot"/> Using Google Gemini for extraction
             </div>
+
+            <div style={{display:'flex',gap:8,marginBottom:12}}>
+              <button className="badge" onClick={()=>setMethod('url')} style={{borderColor: method==='url'? '#d4fbf1':'var(--border)'}}>Single URL</button>
+              <button className="badge" onClick={()=>setMethod('name')} style={{borderColor: method==='name'? '#d4fbf1':'var(--border)'}}>Name + Geography</button>
+              <button className="badge" onClick={()=>setMethod('bulk')} style={{borderColor: method==='bulk'? '#d4fbf1':'var(--border)'}}>Bulk Upload</button>
+            </div>
+
+            {method==='url' && (
+              <div className="form">
+                <Field label="Company Website URL">
+                  <input className="input" placeholder="https://example.com" value={url} onChange={e=>setUrl(e.target.value)} />
+                </Field>
+                <Field label="Mode">
+                  <select className="select" value={mode} onChange={e=>setMode(e.target.value)}>
+                    <option value="realtime">Real-Time</option>
+                    <option value="deep">Deep</option>
+                  </select>
+                </Field>
+              </div>
+            )}
+
+            {method==='name' && (
+              <div className="form">
+                <Field label="Company Name"><input className="input" placeholder="Acme Corp" value={company} onChange={e=>setCompany(e.target.value)} /></Field>
+                <Field label="Geography (optional)"><input className="input" placeholder="United States" value={geo} onChange={e=>setGeo(e.target.value)} /></Field>
+                <Field label="Mode">
+                  <select className="select" value={mode} onChange={e=>setMode(e.target.value)}>
+                    <option value="realtime">Real-Time</option>
+                    <option value="deep">Deep</option>
+                  </select>
+                </Field>
+              </div>
+            )}
+
+            {method==='bulk' && (
+              <div className="form">
+                <div className="small">Upload CSV/XLSX with columns: url or website; OR company and geography.</div>
+                <input type="file" className="input" onChange={e=>setFile(e.target.files?.[0] || null)} />
+                <Field label="Mode">
+                  <select className="select" value={mode} onChange={e=>setMode(e.target.value)}>
+                    <option value="realtime">Real-Time</option>
+                    <option value="deep">Deep</option>
+                  </select>
+                </Field>
+              </div>
+            )}
+
+            <div style={{display:'flex',gap:12,alignItems:'center',marginTop:12}}>
+              <button className="btn" onClick={onRun} disabled={loading || (method==='url' && !url) || (method==='name' && !company) || (method==='bulk' && !file)}>{loading? 'Scraping…':'Run'}</button>
+              {job && (
+                <a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Excel</a>
+              )}
+            </div>
+
+            {loading && <div style={{marginTop:12}}><ProgressInline running={loading}/></div>}
+            {error && <div className="card" style={{borderColor:'#5b0f12', background:'rgba(255,100,100,0.06)', marginTop:12}}>{error}</div>}
+
             <div className="kpis" style={{marginTop:16}}>
-              <div className="kpi"><h4>Verification</h4><div className="v">Basic</div></div>
+              <div className="kpi"><h4>Inputs</h4><div className="v">URL • Name+Geo • Bulk</div></div>
               <div className="kpi"><h4>Export</h4><div className="v">Excel</div></div>
               <div className="kpi"><h4>AI</h4><div className="v">Gemini</div></div>
             </div>
           </div>
+
           <div className="card panel">
-            <h3 style={{margin:0}}>How it works</h3>
-            <ol className="small" style={{lineHeight:1.8}}>
-              <li>We crawl the URL (quick in Real-Time, broader in Deep).</li>
-              <li>Gemini cleans and maps content to our fixed schema.</li>
-              <li>We export to Excel aligned to Moth.xlsx columns.</li>
-              <li>Download instantly from the dashboard.</li>
-            </ol>
-            <div className="small">Coming next: Name+Geo search, email/phone verification APIs, CRM push.</div>
+            <h3 style={{margin:0}}>About</h3>
+            <p className="small" style={{lineHeight:1.8}}>Shoreway Exim Scrapper is a precision data engine for company intelligence. It crawls official sites, reads public pages, and uses AI to produce clean, ready‑to‑use profiles. Built for international sourcing, vendor onboarding, and sales prospecting.</p>
+            <ul className="small" style={{lineHeight:1.8,marginTop:8}}>
+              <li>Real-time or deep multi‑page crawl</li>
+              <li>Automatic social profiles, phones, emails</li>
+              <li>Instant Excel export with verification flags</li>
+              <li>Bulk ingestion for lists from CSV/XLSX</li>
+            </ul>
           </div>
         </div>
 
@@ -122,18 +231,22 @@ function App() {
                 <h3 style={{margin:0}}>Extracted Data</h3>
                 {job && <a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Excel</a>}
               </div>
-              <table className="table">
-                <tbody>
-                  {pairs.map(({k,v}) => <Pair key={k} k={k} v={v} />)}
-                </tbody>
-              </table>
+              <table className="table"><tbody>{pairs.map(({k,v}) => <Pair key={k} k={k} v={v} />)}</tbody></table>
             </div>
           </div>
         )}
 
-        <div className="footer small">
-          © {new Date().getFullYear()} DataHarvester. Clean, minimal, glass UI. Built for speed.
-        </div>
+        {bulkInfo && (
+          <div className="result">
+            <div className="card">
+              <h3 style={{marginTop:0}}>Bulk Results</h3>
+              <div className="small">Processed rows: {bulkInfo.rows}. {bulkInfo.errors?.length? `Errors: ${bulkInfo.errors.length}`: ''}</div>
+              {job && <div style={{marginTop:8}}><a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Consolidated Excel</a></div>}
+            </div>
+          </div>
+        )}
+
+        <div className="footer small">© {new Date().getFullYear()} Shoreway Exim Scrapper. Clean, minimal, glass UI—built for speed.</div>
       </div>
     </div>
   );

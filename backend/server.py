@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import json
+import io
 import time
 import logging
 from datetime import datetime
@@ -28,12 +29,13 @@ DB_NAME = os.environ.get('DB_NAME', 'test_database')
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-# External API keys (Gemini)
+# External API keys (Gemini, Search)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    logging.warning('GEMINI_API_KEY not set. AI extraction will fail until provided.')
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+CSE_ID = os.environ.get('CSE_ID')
+BING_SEARCH_KEY = os.environ.get('BING_SEARCH_KEY')
 
-# Google GenAI SDK (official 2025)
+# Google GenAI SDK
 try:
     from google import genai
 except Exception as e:
@@ -73,6 +75,11 @@ class ScrapeRequest(BaseModel):
     url: str
     mode: str = Field(default=ScrapeMode.REALTIME)
 
+class NameGeoRequest(BaseModel):
+    company_name: str
+    geography: Optional[str] = ""
+    mode: str = Field(default=ScrapeMode.REALTIME)
+
 class ScrapeResult(BaseModel):
     job_id: str
     status: str
@@ -105,7 +112,6 @@ def find_emails(text: str) -> List[str]:
 def find_phones(text: str) -> List[str]:
     if not text:
         return []
-    # Simple phone finder; normalization handled by AI later
     pattern = r"\+?\d[\d\s().-]{6,}\d"
     return sorted(set(re.findall(pattern, text)))
 
@@ -136,13 +142,12 @@ def crawl_site(url: str, mode: str = ScrapeMode.REALTIME, max_pages: int = 10) -
             pages[current] = html
             visited.add(current)
 
-            # enqueue internal links and social profiles
             soup = BeautifulSoup(html, 'lxml')
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if any(dom in href for dom in SOCIAL_DOMAINS):
                     full = absolute_url(current, href)
-                    pages[full] = ''  # mark presence
+                    pages[full] = ''
                 elif current.split('/')[2] in absolute_url(current, href):
                     absu = absolute_url(current, href)
                     if absu not in visited and len(to_visit) < 50:
@@ -168,9 +173,8 @@ def init_gemini_client():
 
 def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     client = init_gemini_client()
-    # Concatenate key HTML texts
     combined = []
-    take = 2  # first two pages content for prompt token safety
+    take = 2
     for i, (u, html) in enumerate(pages.items()):
         if i >= take:
             break
@@ -179,8 +183,7 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     prompt_text = "\n\n".join(combined)[:16000]
 
     system_prompt = (
-        "You are an AI data extractor. Input is raw text from a company website. "
-        "Return JSON exactly in this schema with English fields: {\n"
+        "You are an AI data extractor. Input is raw text from a company website. Return JSON exactly in this schema with English fields: {\n"
         "\"Company Name\": \"\",\n"
         "\"Website\": \"\",\n"
         "\"Industry\": \"\",\n"
@@ -205,7 +208,7 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     }
 
     try:
-        user_text = f"Instructions:\n{system_prompt}\n\nWebsite content:\n{prompt_text}\n\nFollow the instructions strictly." if system_prompt else prompt_text
+        user_text = f"Instructions:\n{system_prompt}\n\nWebsite content:\n{prompt_text}\n\nFollow the instructions strictly."
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
@@ -213,7 +216,6 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
             ]
         )
         raw = getattr(resp, 'text', '') or ''
-        # try to extract JSON block
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
             data = json.loads(m.group(0))
@@ -221,7 +223,6 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
             raise ValueError("no-json")
     except Exception as e:
         logger.warning(f"Gemini extraction failed or returned non-JSON, falling back. Reason: {e}")
-        # Heuristic fallback from first page HTML
         first_html = next(iter(pages.values())) if pages else ''
         soup = BeautifulSoup(first_html, 'lxml') if first_html else None
         title = (soup.title.string if soup and soup.title else '') or ''
@@ -252,11 +253,9 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
             "Verification Status": "UNVERIFIED"
         }
 
-    # Post-fill website if empty
     if not data.get("Website"):
         data["Website"] = company_url
 
-    # Emails and phones fallback from HTML
     html_concat = "\n".join(pages.values())
     emails = find_emails(html_concat)
     phones = find_phones(html_concat)
@@ -265,7 +264,6 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     if phones and not data.get("Phone"):
         data["Phone"] = ", ".join(phones[:3])
 
-    # Collect social links discovered
     socials = sorted({u for u in pages.keys() if any(dom in u for dom in SOCIAL_DOMAINS)})
     if socials:
         existing = data.get("Social Media Links", "")
@@ -287,14 +285,11 @@ def to_excel_rows(data_list: List[Dict[str, Any]]) -> pd.DataFrame:
 
 
 def save_excel_highlight_unverified(df: pd.DataFrame, out_path: str) -> str:
-    # Using pandas ExcelWriter with openpyxl engine
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Results')
         ws = writer.sheets['Results']
-        # Highlight Phone/Email cells if UNVERIFIED
         from openpyxl.styles import PatternFill
         red_fill = PatternFill(start_color='FFCDD2', end_color='FFCDD2', fill_type='solid')
-        # find column indices
         headers = {cell.value: idx for idx, cell in enumerate(ws[1], start=1)}
         phone_col = headers.get('Phone')
         email_col = headers.get('Email')
@@ -302,10 +297,44 @@ def save_excel_highlight_unverified(df: pd.DataFrame, out_path: str) -> str:
         if phone_col and email_col and ver_col:
             for r in range(2, ws.max_row + 1):
                 ver = ws.cell(row=r, column=ver_col).value
-                if ver and 'FAIL' in str(ver).upper() or 'UNVERIFIED' in str(ver).upper():
+                if ver and ('FAIL' in str(ver).upper() or 'UNVERIFIED' in str(ver).upper()):
                     ws.cell(row=r, column=phone_col).fill = red_fill
                     ws.cell(row=r, column=email_col).fill = red_fill
     return out_path
+
+# ---------- Search helpers ----------
+
+def search_official_website(company: str, geography: str = "") -> str:
+    query = f"{company} official site {geography}".strip()
+    # Try Google CSE
+    if GOOGLE_API_KEY and CSE_ID:
+        try:
+            r = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={"q": query, "key": GOOGLE_API_KEY, "cx": CSE_ID}, timeout=12
+            )
+            js = r.json()
+            items = js.get('items') or []
+            if items:
+                return items[0]['link']
+        except Exception as e:
+            logger.warning(f"Google CSE search failed: {e}")
+    # Try Bing
+    if BING_SEARCH_KEY:
+        try:
+            r = requests.get(
+                "https://api.bing.microsoft.com/v7.0/search",
+                headers={"Ocp-Apim-Subscription-Key": BING_SEARCH_KEY},
+                params={"q": query, "textDecorations": False, "mkt": "en-US"}, timeout=12
+            )
+            js = r.json()
+            items = ((js.get('webPages') or {}).get('value')) or []
+            if items:
+                return items[0]['url']
+        except Exception as e:
+            logger.warning(f"Bing search failed: {e}")
+    # No provider configured
+    raise HTTPException(status_code=400, detail='Search provider not configured. Provide GOOGLE_API_KEY+CSE_ID or BING_SEARCH_KEY in backend/.env')
 
 # ---------- Routes ----------
 @api_router.get("/")
@@ -325,41 +354,107 @@ async def get_status_checks():
 
 @api_router.post("/scrape/url", response_model=ScrapeResult)
 async def scrape_url(req: ScrapeRequest):
-    # Basic fetch and AI extraction
     pages = crawl_site(req.url, mode=req.mode)
     if not pages:
         raise HTTPException(status_code=400, detail='Failed to fetch the site')
 
     data = gemini_extract(req.url, pages)
 
-    # Basic verification placeholders (later integrate Twilio/Hunter)
     ver_status = []
     ver_status.append('Phone: UNVERIFIED')
     ver_status.append('Email: UNVERIFIED')
     data['Verification Status'] = '; '.join(ver_status)
 
-    # Save to DB
     job_id = str(uuid.uuid4())
-    record = {
-        'job_id': job_id,
-        'input_url': req.url,
-        'mode': req.mode,
-        'data': data,
-        'created_at': datetime.utcnow().isoformat(),
-        'excel_path': None
-    }
-    await db.scrape_jobs.insert_one(record)
-
-    # Create Excel
     df = to_excel_rows([data])
     out_dir = ROOT_DIR / 'exports'
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = str(out_dir / f'{job_id}.xlsx')
     save_excel_highlight_unverified(df, out_path)
 
-    await db.scrape_jobs.update_one({'job_id': job_id}, {'$set': {'excel_path': out_path}})
+    record = {'job_id': job_id, 'input_url': req.url, 'mode': req.mode, 'data': data, 'created_at': datetime.utcnow().isoformat(), 'excel_path': out_path}
+    await db.scrape_jobs.insert_one(record)
 
     return ScrapeResult(job_id=job_id, status='DONE', data=data, excel_path=out_path, created_at=datetime.utcnow())
+
+@api_router.post("/scrape/name", response_model=ScrapeResult)
+async def scrape_by_name(req: NameGeoRequest):
+    site = search_official_website(req.company_name, req.geography or "")
+    pages = crawl_site(site, mode=req.mode)
+    if not pages:
+        raise HTTPException(status_code=400, detail=f'Failed to fetch site: {site}')
+    data = gemini_extract(site, pages)
+
+    job_id = str(uuid.uuid4())
+    df = to_excel_rows([data])
+    out_dir = ROOT_DIR / 'exports'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = str(out_dir / f'{job_id}.xlsx')
+    save_excel_highlight_unverified(df, out_path)
+    record = {'job_id': job_id, 'input_name': req.company_name, 'geo': req.geography, 'mode': req.mode, 'data': data, 'created_at': datetime.utcnow().isoformat(), 'excel_path': out_path}
+    await db.scrape_jobs.insert_one(record)
+    return ScrapeResult(job_id=job_id, status='DONE', data=data, excel_path=out_path, created_at=datetime.utcnow())
+
+@api_router.post("/bulk/upload")
+async def bulk_upload(file: UploadFile = File(...), mode: str = Form(ScrapeMode.REALTIME)):
+    content = await file.read()
+    name = file.filename or 'upload'
+    df: pd.DataFrame
+    try:
+        if name.lower().endswith('.xlsx') or name.lower().endswith('.xls'):
+            df = pd.read_excel(io.BytesIO(content))
+        else:
+            df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'Failed to parse file: {e}')
+
+    # Normalize columns
+    cols = {c.lower().strip(): c for c in df.columns}
+    url_col = cols.get('url') or cols.get('website')
+    name_col = cols.get('company') or cols.get('company name') or cols.get('name')
+    geo_col = cols.get('geography') or cols.get('country') or cols.get('location')
+
+    results: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    for i, row in df.iterrows():
+        try:
+            site = None
+            if url_col and isinstance(row[url_col], str) and row[url_col].startswith('http'):
+                site = row[url_col]
+            elif name_col and isinstance(row[name_col], str) and row[name_col].strip():
+                # resolve via search if available
+                try:
+                    site = search_official_website(row[name_col], str(row.get(geo_col) or ''))
+                except HTTPException as he:
+                    errors.append(f"Row {i+2}: search not configured - {he.detail}")
+                    continue
+            else:
+                errors.append(f"Row {i+2}: missing URL or Company name")
+                continue
+
+            pages = crawl_site(site, mode=mode)
+            if not pages:
+                errors.append(f"Row {i+2}: failed to fetch {site}")
+                continue
+            data = gemini_extract(site, pages)
+            results.append(data)
+        except Exception as e:
+            errors.append(f"Row {i+2}: {e}")
+
+    if not results:
+        raise HTTPException(status_code=400, detail=f'No successful rows. Errors: {"; ".join(errors[:5])}')
+
+    job_id = str(uuid.uuid4())
+    out_dir = ROOT_DIR / 'exports'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = str(out_dir / f'{job_id}.xlsx')
+    save_excel_highlight_unverified(to_excel_rows(results), out_path)
+
+    record = {'job_id': job_id, 'bulk_file': name, 'mode': mode, 'rows': len(results), 'errors': errors, 'created_at': datetime.utcnow().isoformat(), 'excel_path': out_path}
+    await db.scrape_jobs.insert_one(record)
+
+    return {"job_id": job_id, "status": "DONE", "rows": len(results), "errors": errors[:10], "download": f"/api/download/{job_id}"}
 
 @api_router.get("/download/{job_id}")
 async def download_excel(job_id: str):
