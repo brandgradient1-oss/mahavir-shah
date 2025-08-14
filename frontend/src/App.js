@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import axios from "axios";
 
@@ -26,7 +26,7 @@ function Pair({k,v}){
 const steps = [
   {k:"discover", t:"Finding website"},
   {k:"crawl", t:"Crawling pages"},
-  {k:"ai", t:"Extracting with AI"},
+  {k:"ai", t:"Extracting structured data"},
   {k:"export", t:"Exporting Excel"},
 ];
 
@@ -45,9 +45,9 @@ function ProgressInline({running}){
   },[running]);
   return (
     <div className="card" style={{padding:16}}>
-      <div className="small" style={{marginBottom:8,color:"#b8c2cc"}}>{steps[idx].t}</div>
-      <div style={{height:10, background:"rgba(255,255,255,0.08)", borderRadius:999, overflow:'hidden'}}>
-        <div style={{width:`${p}%`, height:'100%', background:"linear-gradient(90deg,#d4fbf1,#aee9ff)", transition:"width .2s ease"}}/>
+      <div className="small" style={{marginBottom:8,color:"var(--muted)"}}>{steps[idx].t}</div>
+      <div className="progress">
+        <div className="progress-fill" style={{width:`${p}%`}}/>
       </div>
       <div className="small" style={{marginTop:8}}>{p}%</div>
     </div>
@@ -66,6 +66,10 @@ function App() {
   const [bulkInfo, setBulkInfo] = useState(null);
   const [error, setError] = useState("");
   const [file, setFile] = useState(null);
+
+  const featuresRef = useRef(null);
+  const docsRef = useRef(null);
+  const supportRef = useRef(null);
 
   useEffect(() => { axios.get(`${API}/`).catch(()=>{}); }, []);
 
@@ -125,6 +129,10 @@ function App() {
     return order.map(k => ({k, v: data[k]}));
   }, [data]);
 
+  const scrollTo = (ref) => {
+    if(ref?.current){ ref.current.scrollIntoView({behavior:'smooth', block:'start'}); }
+  };
+
   return (
     <div>
       <div className="container">
@@ -134,9 +142,9 @@ function App() {
             <h1>SHOREWAY EXIM SCRAPPER</h1>
           </div>
           <div className="nav">
-            <a href="#features">Features</a>
-            <a href="#docs">Docs</a>
-            <a href="#support">Support</a>
+            <a href="#features" onClick={(e)=>{e.preventDefault(); scrollTo(featuresRef);}}>Features</a>
+            <a href="#docs" onClick={(e)=>{e.preventDefault(); scrollTo(docsRef);}}>Docs</a>
+            <a href="#support" onClick={(e)=>{e.preventDefault(); scrollTo(supportRef);}}>Support</a>
           </div>
         </div>
 
@@ -146,13 +154,13 @@ function App() {
             <p className="subtitle">Crawl websites, extract structured profiles with AI, and export clean Excel files. Works for single URLs, company + geography lookup, and bulk lists. Designed for sourcing, compliance, and go‑to‑market teams.</p>
 
             <div className="badge" style={{marginBottom:12}}>
-              <span className="dot"/> Using Google Gemini for extraction
+              <span className="dot"/> AI‑powered data extraction (provider agnostic)
             </div>
 
             <div style={{display:'flex',gap:8,marginBottom:12}}>
-              <button className="badge" onClick={()=>setMethod('url')} style={{borderColor: method==='url'? '#d4fbf1':'var(--border)'}}>Single URL</button>
-              <button className="badge" onClick={()=>setMethod('name')} style={{borderColor: method==='name'? '#d4fbf1':'var(--border)'}}>Name + Geography</button>
-              <button className="badge" onClick={()=>setMethod('bulk')} style={{borderColor: method==='bulk'? '#d4fbf1':'var(--border)'}}>Bulk Upload</button>
+              <button className="badge" onClick={()=>setMethod('url')} style={{borderColor: method==='url'? '#0b0d10':'#e5e7eb'}}>Single URL</button>
+              <button className="badge" onClick={()=>setMethod('name')} style={{borderColor: method==='name'? '#0b0d10':'#e5e7eb'}}>Name + Geography</button>
+              <button className="badge" onClick={()=>setMethod('bulk')} style={{borderColor: method==='bulk'? '#0b0d10':'#e5e7eb'}}>Bulk Upload</button>
             </div>
 
             {method==='url' && (
@@ -203,25 +211,34 @@ function App() {
             </div>
 
             {loading && <div style={{marginTop:12}}><ProgressInline running={loading}/></div>}
-            {error && <div className="card" style={{borderColor:'#5b0f12', background:'rgba(255,100,100,0.06)', marginTop:12}}>{error}</div>}
+            {error && <div className="card" style={{borderColor:'#ef4444', background:'#fff1f2', marginTop:12, color:'#991b1b'}}>{error}</div>}
 
             <div className="kpis" style={{marginTop:16}}>
               <div className="kpi"><h4>Inputs</h4><div className="v">URL • Name+Geo • Bulk</div></div>
               <div className="kpi"><h4>Export</h4><div className="v">Excel</div></div>
-              <div className="kpi"><h4>AI</h4><div className="v">Gemini</div></div>
+              <div className="kpi"><h4>AI</h4><div className="v">Engine</div></div>
             </div>
           </div>
 
-          <div className="card panel">
-            <h3 style={{margin:0}}>About</h3>
-            <p className="small" style={{lineHeight:1.8}}>Shoreway Exim Scrapper is a precision data engine for company intelligence. It crawls official sites, reads public pages, and uses AI to produce clean, ready‑to‑use profiles. Built for international sourcing, vendor onboarding, and sales prospecting.</p>
-            <ul className="small" style={{lineHeight:1.8,marginTop:8}}>
-              <li>Real-time or deep multi‑page crawl</li>
-              <li>Automatic social profiles, phones, emails</li>
-              <li>Instant Excel export with verification flags</li>
-              <li>Bulk ingestion for lists from CSV/XLSX</li>
+          <div className="card panel" ref={featuresRef} id="features">
+            <h3 style={{margin:0}}>Features</h3>
+            <ul className="small" style={{lineHeight:1.8, marginTop:8, color:'var(--text)'}}>
+              <li>Real-time or deep multi‑page crawling for richer context</li>
+              <li>Automatic discovery of social links, emails, and phone numbers</li>
+              <li>Schema‑mapped output with instant Excel export</li>
+              <li>Bulk ingestion for CSV/XLSX with error reporting</li>
             </ul>
           </div>
+        </div>
+
+        <div className="card" ref={docsRef} id="docs" style={{marginTop:24}}>
+          <h3 style={{marginTop:0}}>Docs</h3>
+          <ol className="small" style={{lineHeight:1.9, color:'var(--text)'}}>
+            <li>Single URL: paste the official website and click Run.</li>
+            <li>Name + Geography: enter company and optional geography; we locate the official site and extract.</li>
+            <li>Bulk: upload CSV/XLSX containing url/website or company + geography columns. Download consolidated Excel.</li>
+            <li>Modes: Real-Time (fast) or Deep (multi‑page) crawl.</li>
+          </ol>
         </div>
 
         {data && (
@@ -246,7 +263,16 @@ function App() {
           </div>
         )}
 
-        <div className="footer small">© {new Date().getFullYear()} Shoreway Exim Scrapper. Clean, minimal, glass UI—built for speed.</div>
+        <div className="card" ref={supportRef} id="support" style={{marginTop:24}}>
+          <h3 style={{marginTop:0}}>Support</h3>
+          <div className="small" style={{color:'var(--text)'}}>We’re here to help. Reach us at:</div>
+          <ul className="small" style={{lineHeight:1.9, marginTop:8}}>
+            <li>Phone: <a href="tel:8376890776" className="link">8376890776</a></li>
+            <li>Email: <a href="mailto:RAHUL@THEGAMINGHUB.IO" className="link">RAHUL@THEGAMINGHUB.IO</a></li>
+          </ul>
+        </div>
+
+        <div className="footer small">© {new Date().getFullYear()} Shoreway Exim Scrapper. Crafted with balanced typography and color contrast for clarity.</div>
       </div>
     </div>
   );
