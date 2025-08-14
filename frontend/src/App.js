@@ -36,7 +36,7 @@ function ProgressInline({running}){
   useEffect(()=>{
     if(!running){ setP(0); setIdx(0); return; }
     let sec = 0; const tm = setInterval(()=>{
-      sec += 0.25; // 250ms
+      sec += 0.25;
       const ratio = Math.min(1, sec/15);
       setP(Math.floor(ratio*100));
       setIdx(Math.min(steps.length-1, Math.floor(ratio*steps.length)));
@@ -46,9 +46,7 @@ function ProgressInline({running}){
   return (
     <div className="card" style={{padding:16}}>
       <div className="small" style={{marginBottom:8,color:"var(--muted)"}}>{steps[idx].t}</div>
-      <div className="progress">
-        <div className="progress-fill" style={{width:`${p}%`}}/>
-      </div>
+      <div className="progress"><div className="progress-fill" style={{width:`${p}%`}}/></div>
       <div className="small" style={{marginTop:8}}>{p}%</div>
     </div>
   );
@@ -67,18 +65,45 @@ function App() {
   const [error, setError] = useState("");
   const [file, setFile] = useState(null);
 
+  // Session state
+  const [sessionId, setSessionId] = useState("");
+  const [addToSession, setAddToSession] = useState(false);
+  const [sessionCount, setSessionCount] = useState(0);
+
   const featuresRef = useRef(null);
   const docsRef = useRef(null);
   const supportRef = useRef(null);
 
   useEffect(() => { axios.get(`${API}/`).catch(()=>{}); }, []);
 
+  const ensureSession = async () => {
+    if(sessionId) return sessionId;
+    const res = await axios.post(`${API}/session/start`);
+    setSessionId(res.data.session_id);
+    return res.data.session_id;
+  };
+
+  const refreshSession = async (sid) => {
+    const res = await axios.get(`${API}/session/${sid}`);
+    setSessionCount(res.data.count || 0);
+  };
+
   const runUrl = async () => {
     setLoading(true); setError(""); setData(null); setJob(null); setBulkInfo(null);
     try {
-      const res = await axios.post(`${API}/scrape/url`, { url, mode });
-      setData(res.data.data);
-      setJob(res.data);
+      if(addToSession){
+        const sid = await ensureSession();
+        const form = new FormData();
+        form.append('session_id', sid);
+        form.append('url', url);
+        form.append('mode', mode);
+        await axios.post(`${API}/session/add/url`, form);
+        await refreshSession(sid);
+      } else {
+        const res = await axios.post(`${API}/scrape/url`, { url, mode });
+        setData(res.data.data);
+        setJob(res.data);
+      }
     } catch (e) {
       const msg = e?.response?.data?.detail || e.message;
       setError(msg);
@@ -88,9 +113,20 @@ function App() {
   const runName = async () => {
     setLoading(true); setError(""); setData(null); setJob(null); setBulkInfo(null);
     try {
-      const res = await axios.post(`${API}/scrape/name`, { company_name: company, geography: geo, mode });
-      setData(res.data.data);
-      setJob(res.data);
+      if(addToSession){
+        const sid = await ensureSession();
+        const form = new FormData();
+        form.append('session_id', sid);
+        form.append('company_name', company);
+        form.append('geography', geo);
+        form.append('mode', mode);
+        await axios.post(`${API}/session/add/name`, form);
+        await refreshSession(sid);
+      } else {
+        const res = await axios.post(`${API}/scrape/name`, { company_name: company, geography: geo, mode });
+        setData(res.data.data);
+        setJob(res.data);
+      }
     } catch (e) {
       const msg = e?.response?.data?.detail || e.message;
       setError(msg);
@@ -120,6 +156,7 @@ function App() {
   };
 
   const downloadHref = useMemo(() => job ? `${API}/download/${job.job_id}` : "#", [job]);
+  const sessionDownloadHref = useMemo(() => sessionId ? `${API}/session/${sessionId}/download` : "#", [sessionId]);
 
   const pairs = useMemo(()=>{
     if(!data) return [];
@@ -129,9 +166,7 @@ function App() {
     return order.map(k => ({k, v: data[k]}));
   }, [data]);
 
-  const scrollTo = (ref) => {
-    if(ref?.current){ ref.current.scrollIntoView({behavior:'smooth', block:'start'}); }
-  };
+  const scrollTo = (ref) => { if(ref?.current){ ref.current.scrollIntoView({behavior:'smooth', block:'start'}); } };
 
   return (
     <div>
@@ -146,6 +181,23 @@ function App() {
             <a href="#docs" onClick={(e)=>{e.preventDefault(); scrollTo(docsRef);}}>Docs</a>
             <a href="#support" onClick={(e)=>{e.preventDefault(); scrollTo(supportRef);}}>Support</a>
           </div>
+        </div>
+
+        {/* Session controls */}
+        <div className="card" style={{marginTop:16, display:'flex', alignItems:'center', gap:12}}>
+          <label className="small" style={{display:'flex', alignItems:'center', gap:8}}>
+            <input type="checkbox" checked={addToSession} onChange={e=>setAddToSession(e.target.checked)} />
+            Add each run to a session (single combined download)
+          </label>
+          {!sessionId && addToSession && (
+            <button className="badge" onClick={async()=>{const s = await ensureSession(); await refreshSession(s);}}>Start Session</button>
+          )}
+          {sessionId && (
+            <>
+              <span className="badge">Session: {sessionCount} item(s)</span>
+              {sessionCount>0 && <a className="badge" href={sessionDownloadHref} target="_blank" rel="noreferrer">Download All</a>}
+            </>
+          )}
         </div>
 
         <div className="hero">
@@ -206,7 +258,7 @@ function App() {
             <div style={{display:'flex',gap:12,alignItems:'center',marginTop:12}}>
               <button className="btn" onClick={onRun} disabled={loading || (method==='url' && !url) || (method==='name' && !company) || (method==='bulk' && !file)}>{loading? 'Scraping…':'Run'}</button>
               {job && (
-                <a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Excel</a>
+                <a className="badge" href={downloadHref} target="_blank" rel="noreferrer">Download Excel</a>
               )}
             </div>
 
@@ -235,7 +287,7 @@ function App() {
           <h3 style={{marginTop:0}}>Docs</h3>
           <ol className="small" style={{lineHeight:1.9, color:'var(--text)'}}>
             <li>Single URL: paste the official website and click Run.</li>
-            <li>Name + Geography: enter company and optional geography; we locate the official site and extract.</li>
+            <li>Name + Geography: enter company and optional geography; we locate the official site using AI-only resolution when search is unavailable.</li>
             <li>Bulk: upload CSV/XLSX containing url/website or company + geography columns. Download consolidated Excel.</li>
             <li>Modes: Real-Time (fast) or Deep (multi‑page) crawl.</li>
           </ol>
@@ -246,7 +298,7 @@ function App() {
             <div className="card">
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
                 <h3 style={{margin:0}}>Extracted Data</h3>
-                {job && <a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Excel</a>}
+                {job && <a className="badge" href={downloadHref} target="_blank" rel="noreferrer">Download Excel</a>}
               </div>
               <table className="table"><tbody>{pairs.map(({k,v}) => <Pair key={k} k={k} v={v} />)}</tbody></table>
             </div>
@@ -258,7 +310,7 @@ function App() {
             <div className="card">
               <h3 style={{marginTop:0}}>Bulk Results</h3>
               <div className="small">Processed rows: {bulkInfo.rows}. {bulkInfo.errors?.length? `Errors: ${bulkInfo.errors.length}`: ''}</div>
-              {job && <div style={{marginTop:8}}><a className="badge" href={downloadHref} target="_blank" rel="noreferrer"><span className="dot"/> Download Consolidated Excel</a></div>}
+              {job && <div style={{marginTop:8}}><a className="badge" href={downloadHref} target="_blank" rel="noreferrer">Download Consolidated Excel</a></div>}
             </div>
           </div>
         )}
