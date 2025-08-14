@@ -7,7 +7,7 @@ import time
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 import pandas as pd
 import requests
@@ -29,7 +29,7 @@ DB_NAME = os.environ.get('DB_NAME', 'test_database')
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-# External API keys (Gemini, Search)
+# External API keys (Search or AI)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 CSE_ID = os.environ.get('CSE_ID')
@@ -129,7 +129,6 @@ def normalize_url(u: str) -> str:
     u = u.strip()
     if not u.startswith("http://") and not u.startswith("https://"):
         u = "https://" + u
-    # If user typed domain without scheme, urlparse may put it in path
     p = requests.utils.urlparse(u)
     if not p.netloc and p.path:
         u = f"https://{p.path}"
@@ -143,19 +142,17 @@ def try_fetch(url: str, headers: Dict[str, str]) -> Optional[requests.Response]:
     host = p.netloc
     no_www = host.replace("www.", "")
     with_www = host if host.startswith("www.") else f"www.{host}"
-    # Build candidate URLs
     candidates.append(base)
     candidates.append(base.replace("http://", "https://"))
     candidates.append(base.replace("https://", "http://"))
     candidates.append(f"https://{with_www}{p.path or ''}")
     candidates.append(f"http://{with_www}{p.path or ''}")
     candidates.append(f"https://{no_www}{p.path or ''}")
-    candidates = list(dict.fromkeys(candidates))  # unique, preserve order
+    candidates = list(dict.fromkeys(candidates))
 
     for c in candidates:
         try:
             r = requests.get(c, timeout=15, headers=headers, allow_redirects=True)
-            # accept 2xx/3xx, or large body even if 403/401 (some sites block but return HTML)
             if (200 <= r.status_code < 400) or (r.status_code in (401,403) and len(r.text) > 500):
                 return r
         except Exception as e:
@@ -191,7 +188,6 @@ def crawl_site(url: str, mode: str = ScrapeMode.REALTIME, max_pages: int = 10) -
                     pages[full] = ''
                 else:
                     absu = absolute_url(current, href)
-                    # same host only
                     try:
                         if requests.utils.urlparse(absu).netloc.endswith(requests.utils.urlparse(current).netloc.replace('www.', '')):
                             if absu not in visited and len(to_visit) < 50:
@@ -204,6 +200,7 @@ def crawl_site(url: str, mode: str = ScrapeMode.REALTIME, max_pages: int = 10) -
             continue
     return pages
 
+# ---------- AI extraction ----------
 
 def init_gemini_client():
     if genai is None:
@@ -246,12 +243,6 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
         "\"Founders/Key People\": \"\",\n"
         "\"Verification Status\": \"UNVERIFIED\"\n}"
     )
-
-    schema = {
-        "type": "object",
-        "properties": {h: {"type": "string"} for h in MOTH_HEADERS[:-1]},
-        "required": MOTH_HEADERS[:-1]
-    }
 
     try:
         user_text = f"Instructions:\n{system_prompt}\n\nWebsite content:\n{prompt_text}\n\nFollow the instructions strictly."
@@ -319,6 +310,123 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     data["Verification Status"] = "UNVERIFIED"
     return data
 
+# ---------- AI-only contact verification ----------
+
+def _norm_phone(p: str) -> str:
+    if not p:
+        return ''
+    p = re.sub(r"[^+\d]", "", p)
+    # keep last 11-15 digits incl '+' if present
+    if p.startswith('+'):
+        core = re.sub(r"\D", "", p)
+        return '+' + core
+    return re.sub(r"\D", "", p)
+
+
+def _domain_from_url(u: str) -> str:
+    try:
+        host = requests.utils.urlparse(normalize_url(u)).netloc.lower()
+        return host.replace('www.', '')
+    except Exception:
+        return ''
+
+
+def ai_verify_contacts(data: Dict[str, Any], pages: Dict[str, str], site_url: str) -> Tuple[Dict[str, Any], str]:
+    site_domain = _domain_from_url(site_url)
+
+    # Build per-url discoveries
+    per_url_emails: Dict[str, set] = {}
+    per_url_phones: Dict[str, set] = {}
+
+    for u, html in pages.items():
+        if not html:
+            continue
+        es = find_emails(html)
+        ps = find_phones(html)
+        if es:
+            per_url_emails[u] = set(es)
+        if ps:
+            per_url_phones[u] = set(ps)
+
+    # Frequency maps
+    email_freq: Dict[str, int] = {}
+    phone_freq: Dict[str, int] = {}
+
+    for u, s in per_url_emails.items():
+        for e in s:
+            email_freq[e.lower()] = email_freq.get(e.lower(), 0) + 1
+    for u, s in per_url_phones.items():
+        for p in s:
+            phone_freq[_norm_phone(p)] = phone_freq.get(_norm_phone(p), 0) + 1
+
+    # Extracted
+    extracted_email = (data.get('Email') or '').split(',')[0].strip().lower()
+    extracted_phone = _norm_phone((data.get('Phone') or '').split(',')[0].strip())
+
+    # Best candidates
+    top_email = max(email_freq.items(), key=lambda x: x[1])[0] if email_freq else ''
+    top_email_count = email_freq.get(top_email, 0)
+
+    top_phone = ''
+    top_phone_count = 0
+    if phone_freq:
+        top_phone, top_phone_count = max(phone_freq.items(), key=lambda x: x[1])
+
+    # Confidence helpers
+    def conf_from_count(cnt: int, total_urls: int) -> float:
+        if cnt <= 0:
+            return 0.0
+        base = 0.5 + min(0.4, (cnt - 1) * 0.15)  # 0.65 for 2 urls, 0.8 for 3, 0.95 caps
+        size_bonus = 0.05 if total_urls >= 3 else 0
+        return min(0.95, base + size_bonus)
+
+    total_urls = len([h for h in pages.values() if h])
+
+    # Email verification (AI consistency)
+    email_status = 'UNVERIFIED'
+    email_conf = 0.0
+    chosen_email = extracted_email
+    if extracted_email and extracted_email in email_freq and email_freq[extracted_email] >= 2:
+        email_conf = conf_from_count(email_freq[extracted_email], total_urls)
+        # domain bonus if matches site domain
+        try:
+            e_dom = extracted_email.split('@')[-1].lower()
+            if site_domain and (e_dom == site_domain or e_dom.endswith('.' + site_domain)):
+                email_conf = min(0.98, email_conf + 0.07)
+        except Exception:
+            pass
+        email_status = f"VERIFIED (AI {email_conf:.2f})"
+    elif top_email and email_freq[top_email] >= 2:
+        chosen_email = top_email
+        email_conf = conf_from_count(email_freq[top_email], total_urls)
+        try:
+            e_dom = top_email.split('@')[-1].lower()
+            if site_domain and (e_dom == site_domain or e_dom.endswith('.' + site_domain)):
+                email_conf = min(0.98, email_conf + 0.07)
+        except Exception:
+            pass
+        email_status = f"VERIFIED (AI {email_conf:.2f})"
+        # set field if empty
+        if not data.get('Email'):
+            data['Email'] = top_email
+
+    # Phone verification (AI consistency)
+    phone_status = 'UNVERIFIED'
+    phone_conf = 0.0
+    if extracted_phone and extracted_phone in phone_freq and phone_freq[extracted_phone] >= 2:
+        phone_conf = conf_from_count(phone_freq[extracted_phone], total_urls)
+        phone_status = f"VERIFIED (AI {phone_conf:.2f})"
+    elif top_phone and top_phone_count >= 2:
+        phone_conf = conf_from_count(top_phone_count, total_urls)
+        phone_status = f"VERIFIED (AI {phone_conf:.2f})"
+        if not data.get('Phone'):
+            data['Phone'] = top_phone
+
+    status = f"Phone: {phone_status}; Email: {email_status}"
+    data['Verification Status'] = status
+    return data, status
+
+# ---------- Excel helpers ----------
 
 def to_excel_rows(data_list: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
@@ -379,7 +487,6 @@ def search_official_website(company: str, geography: str = "") -> str:
                 return items[0]['url']
         except Exception as e:
             logger.warning(f"Bing search failed: {e}")
-    # No provider configured
     raise HTTPException(status_code=400, detail='Search provider not configured. Provide GOOGLE_API_KEY+CSE_ID or BING_SEARCH_KEY in backend/.env')
 
 # ---------- Routes ----------
@@ -405,11 +512,7 @@ async def scrape_url(req: ScrapeRequest):
         raise HTTPException(status_code=400, detail='Failed to fetch the site')
 
     data = gemini_extract(req.url, pages)
-
-    ver_status = []
-    ver_status.append('Phone: UNVERIFIED')
-    ver_status.append('Email: UNVERIFIED')
-    data['Verification Status'] = '; '.join(ver_status)
+    data, _ = ai_verify_contacts(data, pages, req.url)
 
     job_id = str(uuid.uuid4())
     df = to_excel_rows([data])
@@ -430,6 +533,7 @@ async def scrape_by_name(req: NameGeoRequest):
     if not pages:
         raise HTTPException(status_code=400, detail=f'Failed to fetch site: {site}')
     data = gemini_extract(site, pages)
+    data, _ = ai_verify_contacts(data, pages, site)
 
     job_id = str(uuid.uuid4())
     df = to_excel_rows([data])
@@ -454,7 +558,6 @@ async def bulk_upload(file: UploadFile = File(...), mode: str = Form(ScrapeMode.
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'Failed to parse file: {e}')
 
-    # Normalize columns
     cols = {c.lower().strip(): c for c in df.columns}
     url_col = cols.get('url') or cols.get('website')
     name_col = cols.get('company') or cols.get('company name') or cols.get('name')
@@ -466,10 +569,9 @@ async def bulk_upload(file: UploadFile = File(...), mode: str = Form(ScrapeMode.
     for i, row in df.iterrows():
         try:
             site = None
-            if url_col and isinstance(row[url_col], str) and row[url_col].startswith('http'):
-                site = row[url_col]
+            if url_col and isinstance(row[url_col], str) and row[url_col].strip():
+                site = str(row[url_col]).strip()
             elif name_col and isinstance(row[name_col], str) and row[name_col].strip():
-                # resolve via search if available
                 try:
                     site = search_official_website(row[name_col], str(row.get(geo_col) or ''))
                 except HTTPException as he:
@@ -484,6 +586,7 @@ async def bulk_upload(file: UploadFile = File(...), mode: str = Form(ScrapeMode.
                 errors.append(f"Row {i+2}: failed to fetch {site}")
                 continue
             data = gemini_extract(site, pages)
+            data, _ = ai_verify_contacts(data, pages, site)
             results.append(data)
         except Exception as e:
             errors.append(f"Row {i+2}: {e}")
