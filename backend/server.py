@@ -208,9 +208,9 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                {"role": "system", "parts": [{"text": system_prompt}]},
                 {"role": "user", "parts": [{"text": prompt_text}]}
             ],
+            system_instruction=system_prompt,
             config={
                 "response_mime_type": "application/json",
                 "response_schema": schema
