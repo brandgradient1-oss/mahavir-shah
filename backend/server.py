@@ -123,19 +123,60 @@ def absolute_url(base: str, link: str) -> str:
         return link
 
 
+def normalize_url(u: str) -> str:
+    if not u:
+        return u
+    u = u.strip()
+    if not u.startswith("http://") and not u.startswith("https://"):
+        u = "https://" + u
+    # If user typed domain without scheme, urlparse may put it in path
+    p = requests.utils.urlparse(u)
+    if not p.netloc and p.path:
+        u = f"https://{p.path}"
+    return u
+
+
+def try_fetch(url: str, headers: Dict[str, str]) -> Optional[requests.Response]:
+    candidates = []
+    base = normalize_url(url)
+    p = requests.utils.urlparse(base)
+    host = p.netloc
+    no_www = host.replace("www.", "")
+    with_www = host if host.startswith("www.") else f"www.{host}"
+    # Build candidate URLs
+    candidates.append(base)
+    candidates.append(base.replace("http://", "https://"))
+    candidates.append(base.replace("https://", "http://"))
+    candidates.append(f"https://{with_www}{p.path or ''}")
+    candidates.append(f"http://{with_www}{p.path or ''}")
+    candidates.append(f"https://{no_www}{p.path or ''}")
+    candidates = list(dict.fromkeys(candidates))  # unique, preserve order
+
+    for c in candidates:
+        try:
+            r = requests.get(c, timeout=15, headers=headers, allow_redirects=True)
+            # accept 2xx/3xx, or large body even if 403/401 (some sites block but return HTML)
+            if (200 <= r.status_code < 400) or (r.status_code in (401,403) and len(r.text) > 500):
+                return r
+        except Exception as e:
+            logger.warning(f"Fetch attempt failed {c}: {e}")
+    return None
+
+
 def crawl_site(url: str, mode: str = ScrapeMode.REALTIME, max_pages: int = 10) -> Dict[str, Any]:
     visited = set()
-    to_visit = [url]
+    to_visit = [normalize_url(url)]
     pages = {}
     count_limit = 2 if mode == ScrapeMode.REALTIME else max_pages
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 
     while to_visit and len(visited) < count_limit:
         current = to_visit.pop(0)
         if current in visited:
             continue
         try:
-            r = requests.get(current, timeout=12)
-            if r.status_code != 200:
+            r = try_fetch(current, headers)
+            if not r:
                 visited.add(current)
                 continue
             html = r.text
@@ -148,10 +189,15 @@ def crawl_site(url: str, mode: str = ScrapeMode.REALTIME, max_pages: int = 10) -
                 if any(dom in href for dom in SOCIAL_DOMAINS):
                     full = absolute_url(current, href)
                     pages[full] = ''
-                elif current.split('/')[2] in absolute_url(current, href):
+                else:
                     absu = absolute_url(current, href)
-                    if absu not in visited and len(to_visit) < 50:
-                        to_visit.append(absu)
+                    # same host only
+                    try:
+                        if requests.utils.urlparse(absu).netloc.endswith(requests.utils.urlparse(current).netloc.replace('www.', '')):
+                            if absu not in visited and len(to_visit) < 50:
+                                to_visit.append(absu)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"Failed to fetch {current}: {e}")
             visited.add(current)
