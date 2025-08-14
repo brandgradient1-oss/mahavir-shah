@@ -218,10 +218,39 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
         if m:
             data = json.loads(m.group(0))
         else:
-            raise ValueError(f"Model did not return JSON. Raw: {raw[:200]}")
+            raise ValueError("no-json")
     except Exception as e:
-        logger.error(f"Gemini extraction failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Gemini extraction failed: {e}")
+        logger.warning(f"Gemini extraction failed or returned non-JSON, falling back. Reason: {e}")
+        # Heuristic fallback from first page HTML
+        first_html = next(iter(pages.values())) if pages else ''
+        soup = BeautifulSoup(first_html, 'lxml') if first_html else None
+        title = (soup.title.string if soup and soup.title else '') or ''
+        meta_desc = ''
+        if soup:
+            md = soup.find('meta', attrs={'name':'description'}) or soup.find('meta', attrs={'property':'og:description'})
+            if md and md.get('content'):
+                meta_desc = md['content']
+        para = ''
+        if soup:
+            p = soup.find('p')
+            para = p.get_text(" ").strip() if p else ''
+        data = {
+            "Company Name": title.strip()[:200],
+            "Website": company_url,
+            "Industry": "",
+            "Description": (meta_desc or para)[:1000],
+            "Services": "",
+            "Address": "",
+            "Country": "",
+            "State": "",
+            "City": "",
+            "Postal Code": "",
+            "Phone": "",
+            "Email": "",
+            "Social Media Links": "",
+            "Founders/Key People": "",
+            "Verification Status": "UNVERIFIED"
+        }
 
     # Post-fill website if empty
     if not data.get("Website"):
