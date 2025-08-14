@@ -205,12 +205,12 @@ def gemini_extract(company_url: str, pages: Dict[str, str]) -> Dict[str, Any]:
     }
 
     try:
+        user_text = f"Instructions:\n{system_prompt}\n\nWebsite content:\n{prompt_text}\n\nFollow the instructions strictly." if system_prompt else prompt_text
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                {"role": "user", "parts": [{"text": prompt_text}]}
+                {"role": "user", "parts": [{"text": user_text}]}
             ],
-            system_instruction=system_prompt,
             config={
                 "response_mime_type": "application/json",
                 "response_schema": schema
